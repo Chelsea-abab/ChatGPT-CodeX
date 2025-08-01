@@ -9,7 +9,7 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 import numpy as np
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 
 
@@ -28,30 +28,28 @@ class EmbeddingDataset(Dataset):
 
 
 class MLPClassifier(nn.Module):
-    def __init__(self, embedding_dim=EMBED_DIM, num_classes=NUM_CLASSES, use_three_layers=False):
+    def __init__(
+        self,
+        input_dim: int,
+        num_classes: int,
+        hidden_dims: Iterable[int] = (256, 128),
+        dropout: float = 0.1,
+    ):
+        """Simple fully connected network for classification."""
         super().__init__()
-        self.use_three = use_three_layers
-        self.fc1 = nn.Linear(embedding_dim, H1)
-        self.bn1 = nn.BatchNorm1d(H1)
-        self.fc2 = nn.Linear(H1, H2)
-        self.bn2 = nn.BatchNorm1d(H2)
-        if self.use_three:
-            self.fc3 = nn.Linear(H2, H3)
-            self.bn3 = nn.BatchNorm1d(H3)
-            self.fc_out = nn.Linear(H3, num_classes)
-        else:
-            self.fc_out = nn.Linear(H2, num_classes)
-        self.dropout = nn.Dropout(0.3)
-    def forward(self, x):
-        x = F.relu(self.bn1(self.fc1(x)))
-        x = self.dropout(x)
-        x = F.relu(self.bn2(self.fc2(x)))
-        x = self.dropout(x)
-        if self.use_three:
-            x = F.relu(self.bn3(self.fc3(x)))
-            x = self.dropout(x)
-        logits = self.fc_out(x)
-        return logits
+        layers: List[nn.Module] = []
+        prev_dim = input_dim
+        for h in hidden_dims:
+            layers.append(nn.Linear(prev_dim, h))
+            layers.append(nn.ReLU())
+            layers.append(nn.Dropout(dropout))
+            prev_dim = h
+        self.feature_extractor = nn.Sequential(*layers)
+        self.fc_out = nn.Linear(prev_dim, num_classes)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+        x = self.feature_extractor(x)
+        return self.fc_out(x)
 
 
 def evaluate_metrics(
@@ -107,8 +105,16 @@ def train_mlp_classifier(
     epochs: int = 10,
     batch_size: int = 32,
     device: torch.device | None = None,
+    use_class_weights: bool = True,
+    use_weighted_sampler: bool = True,
 ) -> MLPClassifier:
-    """Train an MLP classifier from pre-computed embeddings."""
+    """Train an MLP classifier from pre-computed embeddings.
+
+    When ``use_class_weights`` is ``True`` the cross entropy loss is weighted
+    inversely proportional to class frequencies. If ``use_weighted_sampler`` is
+    ``True`` the dataloader uses :class:`WeightedRandomSampler` so that each
+    class is sampled with approximately equal probability.
+    """
 
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -122,10 +128,22 @@ def train_mlp_classifier(
     ).to(device)
 
     dataset = EmbeddingDataset(train_embeddings, train_labels)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    class_counts = np.bincount(train_labels, minlength=num_classes)
+    class_weights = 1.0 / np.maximum(class_counts, 1)
+    if use_weighted_sampler:
+        sample_weights = [class_weights[label] for label in train_labels]
+        sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights), replacement=True)
+        dataloader = DataLoader(dataset, batch_size=batch_size, sampler=sampler)
+    else:
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    criterion = nn.CrossEntropyLoss()
+    if use_class_weights:
+        weight_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
+        criterion = nn.CrossEntropyLoss(weight=weight_tensor)
+    else:
+        criterion = nn.CrossEntropyLoss()
 
     for epoch in range(1, epochs + 1):
         model.train()
