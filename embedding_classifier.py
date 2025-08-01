@@ -28,29 +28,30 @@ class EmbeddingDataset(Dataset):
 
 
 class MLPClassifier(nn.Module):
-    """A simple multilayer perceptron classifier."""
-
-    def __init__(
-        self,
-        input_dim: int,
-        num_classes: int,
-        hidden_dims: Iterable[int] = (256, 128),
-        dropout: float = 0.1,
-    ) -> None:
+    def __init__(self, embedding_dim=EMBED_DIM, num_classes=NUM_CLASSES, use_three_layers=False):
         super().__init__()
-        layers: List[nn.Module] = []
-        prev_dim = input_dim
-        for h in hidden_dims:
-            layers.append(nn.Linear(prev_dim, h))
-            layers.append(nn.ReLU())
-            if dropout > 0:
-                layers.append(nn.Dropout(dropout))
-            prev_dim = h
-        layers.append(nn.Linear(prev_dim, num_classes))
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
-        return self.net(x)
+        self.use_three = use_three_layers
+        self.fc1 = nn.Linear(embedding_dim, H1)
+        self.bn1 = nn.BatchNorm1d(H1)
+        self.fc2 = nn.Linear(H1, H2)
+        self.bn2 = nn.BatchNorm1d(H2)
+        if self.use_three:
+            self.fc3 = nn.Linear(H2, H3)
+            self.bn3 = nn.BatchNorm1d(H3)
+            self.fc_out = nn.Linear(H3, num_classes)
+        else:
+            self.fc_out = nn.Linear(H2, num_classes)
+        self.dropout = nn.Dropout(0.3)
+    def forward(self, x):
+        x = F.relu(self.bn1(self.fc1(x)))
+        x = self.dropout(x)
+        x = F.relu(self.bn2(self.fc2(x)))
+        x = self.dropout(x)
+        if self.use_three:
+            x = F.relu(self.bn3(self.fc3(x)))
+            x = self.dropout(x)
+        logits = self.fc_out(x)
+        return logits
 
 
 def evaluate_metrics(
